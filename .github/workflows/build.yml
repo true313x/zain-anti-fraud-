@@ -1,0 +1,242 @@
+name: Build Zain IQ FraudShield
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================
+      # 1. Checkout repository
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # 2. Find uploaded ZIP
+      # ==========================================
+      - name: Find project ZIP
+        id: find_zip
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f \
+            \( -iname "*.zip" \) \
+            | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found."
+            exit 1
+          fi
+
+          echo "Found ZIP: $ZIP_FILE"
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      # ==========================================
+      # 3. Extract ZIP
+      # ==========================================
+      - name: Extract project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p extracted
+
+          unzip -o "${{ steps.find_zip.outputs.zip_file }}" \
+            -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 3 -type f | sort
+
+      # ==========================================
+      # 4. Detect project root
+      # ==========================================
+      - name: Detect project root
+        id: root
+        shell: bash
+        run: |
+          set -e
+
+          ROOT="extracted"
+
+          # Handle ZIP containing one top-level directory
+          DIRS=$(find extracted -mindepth 1 -maxdepth 1 -type d | wc -l)
+          FILES=$(find extracted -mindepth 1 -maxdepth 1 -type f | wc -l)
+
+          if [ "$DIRS" = "1" ] && [ "$FILES" = "0" ]; then
+            ROOT=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          fi
+
+          echo "Project root: $ROOT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      # ==========================================
+      # 5. Show project structure
+      # ==========================================
+      - name: Inspect project
+        run: |
+          echo "========== PROJECT STRUCTURE =========="
+          find "${{ steps.root.outputs.root }}" \
+            -maxdepth 4 -type f | sort
+          echo "======================================="
+
+      # ==========================================
+      # 6. Python setup
+      # ==========================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ==========================================
+      # 7. Install backend dependencies
+      # ==========================================
+      - name: Install backend dependencies
+        working-directory: ${{ steps.root.outputs.root }}/backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ==========================================
+      # 8. Train demo ML model
+      # ==========================================
+      - name: Train FraudShield ML model
+        working-directory: ${{ steps.root.outputs.root }}/backend
+        run: |
+          python scripts/train_model.py
+
+      # ==========================================
+      # 9. Evaluate ML model
+      # ==========================================
+      - name: Evaluate ML model
+        working-directory: ${{ steps.root.outputs.root }}/backend
+        run: |
+          python scripts/evaluate_model.py
+
+      # ==========================================
+      # 10. Run backend tests
+      # ==========================================
+      - name: Run backend tests
+        working-directory: ${{ steps.root.outputs.root }}/backend
+        run: |
+          pytest -v
+
+      # ==========================================
+      # 11. Test FastAPI import
+      # ==========================================
+      - name: Validate FastAPI application
+        working-directory: ${{ steps.root.outputs.root }}/backend
+        run: |
+          python -c "from app.main import app; print('FastAPI application loaded successfully')"
+
+      # ==========================================
+      # 12. Setup Node.js
+      # ==========================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ steps.root.outputs.root }}/frontend/package.json
+
+      # ==========================================
+      # 13. Install frontend dependencies
+      # ==========================================
+      - name: Install frontend dependencies
+        working-directory: ${{ steps.root.outputs.root }}/frontend
+        run: |
+          npm install
+
+      # ==========================================
+      # 14. Build frontend
+      # ==========================================
+      - name: Build frontend
+        working-directory: ${{ steps.root.outputs.root }}/frontend
+        run: |
+          npm run build
+
+      # ==========================================
+      # 15. Install Docker Buildx
+      # ==========================================
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ==========================================
+      # 16. Build backend Docker image
+      # ==========================================
+      - name: Build backend Docker image
+        working-directory: ${{ steps.root.outputs.root }}
+        run: |
+          docker build \
+            -t zain-fraudshield-backend:ci \
+            ./backend
+
+      # ==========================================
+      # 17. Build frontend Docker image
+      # ==========================================
+      - name: Build frontend Docker image
+        working-directory: ${{ steps.root.outputs.root }}
+        run: |
+          docker build \
+            -t zain-fraudshield-frontend:ci \
+            ./frontend
+
+      # ==========================================
+      # 18. Validate docker-compose
+      # ==========================================
+      - name: Validate Docker Compose
+        working-directory: ${{ steps.root.outputs.root }}
+        run: |
+          docker compose config
+
+      # ==========================================
+      # 19. Package build artifacts
+      # ==========================================
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p artifacts
+
+          cp -r "${{ steps.root.outputs.root }}/frontend/dist" \
+            artifacts/frontend-dist
+
+          cp -r "${{ steps.root.outputs.root }}/backend/models" \
+            artifacts/backend-models
+
+          cp "${{ steps.root.outputs.root }}/README.md" \
+            artifacts/README.md
+
+      # ==========================================
+      # 20. Upload build artifacts
+      # ==========================================
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zain-fraudshield-build
+          path: artifacts/
+          retention-days: 7
+
+      # ==========================================
+      # 21. Final status
+      # ==========================================
+      - name: Build completed
+        run: |
+          echo "=========================================="
+          echo " ZAIN IQ FRAUDSHIELD BUILD SUCCESSFUL"
+          echo "=========================================="
+          echo "Backend tests: PASSED"
+          echo "ML training: PASSED"
+          echo "ML evaluation: PASSED"
+          echo "Frontend build: PASSED"
+          echo "Docker backend: PASSED"
+          echo "Docker frontend: PASSED"
+          echo "Docker Compose: PASSED"
+          echo "=========================================="
